@@ -1,0 +1,13 @@
+ipch/
+*.user
+*.cache
+*.opensdf
+*.sdf
+*.suo
+*.orig
+
+#Ignore binary data
+/PremakeExtension/bin/
+/PremakeExtension/obj/
+/packages/
+
