@@ -99,7 +99,8 @@ namespace PremakeExtension
             if (!string.IsNullOrEmpty(script))
             {
                 var premakePath = UseGlobalSetting ? PremakePath : GetPremakeBinary();
-                var premakeArguments = string.Format("--file={0} {1}", script, GetPremakeArguments());
+                var premakeArguments = string.Format("--file=\"{0}\" {1}", script, GetPremakeArguments());
+                var premakeWorkingDir = Path.GetDirectoryName(script);
 
                 var outputWindow = Package.GetGlobalService(typeof(SVsOutputWindow)) as IVsOutputWindow;
                 if (outputWindow != null)
@@ -116,12 +117,21 @@ namespace PremakeExtension
                     }
                     else
                     {
+                        #if DEBUG
+                            pane.OutputString( "[Debug] Premake Binary: " + GetPremakeBinary() + " (" + PremakePath + ")\n" );
+                            pane.OutputString( "[Debug] Premake Script: " + script + "\n" );
+                            pane.OutputString( "[Debug] Premake WorkingDir: " + premakeWorkingDir + "\n" );
+                            pane.OutputString( "[Debug] Premake Arguments: " + GetPremakeArguments() + "\n" );
+                            pane.OutputString( "[Debug] Premake Execute: " + premakePath + " " + premakeArguments + "\n" );
+                        #endif
+
                         var proc = new System.Diagnostics.Process();
                         proc.StartInfo.CreateNoWindow = true;
                         proc.StartInfo.RedirectStandardOutput = true;
                         proc.StartInfo.RedirectStandardError = true;
                         proc.StartInfo.UseShellExecute = false;
                         proc.StartInfo.FileName = premakePath;
+                        proc.StartInfo.WorkingDirectory = premakeWorkingDir;
                         proc.StartInfo.Arguments = premakeArguments;
                         proc.Start();
 
@@ -172,7 +182,7 @@ namespace PremakeExtension
             if (!globals.VariableExists[name])
                 return null;
 
-            return (string)globals[name];
+            return globals[name].ToString();
         }
     }
 }
