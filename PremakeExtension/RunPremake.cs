@@ -122,6 +122,7 @@ namespace PremakeExtension
                     outputWindow.CreatePane(guidGeneral, "Premake", 1, 0);
                     outputWindow.GetPane(guidGeneral, out pane);
                     pane.Activate();
+                    pane.Clear();
 
                     if (string.IsNullOrEmpty(premakePath))
                     {
@@ -141,13 +142,11 @@ namespace PremakeExtension
 
                         proc.OutputDataReceived += (o, args) =>
                         {
-                            ThreadHelper.ThrowIfNotOnUIThread();
-                            pane.OutputString(args.Data + "\n");
+                            pane.OutputStringThreadSafe(args.Data + "\n");
                         };
                         proc.ErrorDataReceived += (o, args) =>
                         {
-                            ThreadHelper.ThrowIfNotOnUIThread();
-                            pane.OutputString(args.Data + "\n");
+                            pane.OutputStringThreadSafe(args.Data + "\n");
                         };
 
                         proc.BeginOutputReadLine();
