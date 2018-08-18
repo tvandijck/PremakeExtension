@@ -1,16 +1,12 @@
-﻿//------------------------------------------------------------------------------
-// <copyright file="RunPremake.cs" company="Company">
-//     Copyright (c) Company.  All rights reserved.
-// </copyright>
-//------------------------------------------------------------------------------
-
-using System;
+﻿using System;
 using System.ComponentModel.Design;
 using System.IO;
+using System.Threading.Tasks;
 using EnvDTE;
 using EnvDTE80;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
+using Task = System.Threading.Tasks.Task;
 
 namespace PremakeExtension
 {
@@ -27,60 +23,68 @@ namespace PremakeExtension
         /// <summary>
         /// Command menu group (command set GUID).
         /// </summary>
-        public static readonly Guid CommandSet = new Guid("fca319f8-1356-4986-bff8-a705a3034021");
+        public static readonly Guid CommandSet = new Guid("153eb81e-b6f2-43ec-8c00-f48d3f957d30");
 
         /// <summary>
         /// VS Package that provides this command, not null.
         /// </summary>
-        private readonly Package package;
+        private readonly AsyncPackage package;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="RunPremake"/> class.
         /// Adds our command handlers for menu (commands must exist in the command table file)
         /// </summary>
         /// <param name="package">Owner package, not null.</param>
-        private RunPremake(Package package)
+        /// <param name="commandService">Command service to add command to, not null.</param>
+        private RunPremake(AsyncPackage package, OleMenuCommandService commandService)
         {
-            if (package == null)
-            {
-                throw new ArgumentNullException(nameof(package));
-            }
+            this.package = package ?? throw new ArgumentNullException(nameof(package));
+            commandService = commandService ?? throw new ArgumentNullException(nameof(commandService));
 
-            this.package = package;
-
-            var commandService = this.ServiceProvider.GetService(typeof(IMenuCommandService)) as OleMenuCommandService;
-            if (commandService != null)
-            {
-                var menuCommandID = new CommandID(CommandSet, CommandId);
-                var menuItem = new OleMenuCommand(this.ExecutePremake, menuCommandID);
-                menuItem.BeforeQueryStatus += MenuItemOnBeforeQueryStatus;
-                commandService.AddCommand(menuItem);
-            }
+            var menuCommandID = new CommandID(CommandSet, CommandId);
+            var menuItem = new OleMenuCommand(this.Execute, menuCommandID);
+            menuItem.BeforeQueryStatus += MenuItemOnBeforeQueryStatus;
+            commandService.AddCommand(menuItem);
         }
 
-        private void MenuItemOnBeforeQueryStatus(object sender, EventArgs eventArgs)
+        private async void MenuItemOnBeforeQueryStatus(object sender, EventArgs eventArgs)
         {
             var menuItem = sender as OleMenuCommand;
             if (menuItem != null)
             {
-                menuItem.Visible = !string.IsNullOrEmpty(GetPremakeScript());
+                menuItem.Visible = !string.IsNullOrEmpty(await GetPremakeScriptAsync());
             }
         }
 
+        /// <summary>
+        /// Gets the instance of the command.
+        /// </summary>
         public static RunPremake Instance
         {
             get;
             private set;
         }
 
-        private IServiceProvider ServiceProvider
+        /// <summary>
+        /// Gets the service provider from the owner package.
+        /// </summary>
+        private Microsoft.VisualStudio.Shell.IAsyncServiceProvider ServiceProvider
         {
             get { return this.package; }
         }
 
-        public static void Initialize(Package package)
+        /// <summary>
+        /// Initializes the singleton instance of the command.
+        /// </summary>
+        /// <param name="package">Owner package, not null.</param>
+        public static async Task InitializeAsync(AsyncPackage package)
         {
-            Instance = new RunPremake(package);
+            // Switch to the main thread - the call to AddCommand in RunPremake's constructor requires
+            // the UI thread.
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(package.DisposalToken);
+
+            OleMenuCommandService commandService = await package.GetServiceAsync((typeof(IMenuCommandService))) as OleMenuCommandService;
+            Instance = new RunPremake(package, commandService);
         }
 
         public string PremakePath
@@ -93,14 +97,23 @@ namespace PremakeExtension
             get { return ((RunPremakePackage)package).UseGlobalSetting; }
         }
 
-        private void ExecutePremake(object sender, EventArgs e)
+        /// <summary>
+        /// This function is the callback used to execute the command when the menu item is clicked.
+        /// See the constructor to see how the menu item is associated with this function using
+        /// OleMenuCommandService service and MenuCommand class.
+        /// </summary>
+        /// <param name="sender">Event sender.</param>
+        /// <param name="e">Event args.</param>
+        private async void Execute(object sender, EventArgs e)
         {
-            var script = GetPremakeScript();
+            var script = await GetPremakeScriptAsync();
             if (!string.IsNullOrEmpty(script))
             {
-                var premakePath = UseGlobalSetting ? PremakePath : GetPremakeBinary();
-                var premakeArguments = string.Format("--file={0} {1}", script, GetPremakeArguments());
+                var premakePath = UseGlobalSetting ? PremakePath : await GetPremakeBinaryAsync();
+                var premakeArguments = string.Format("--file=\"{0}\" {1}", script, await GetPremakeArgumentsAsync());
+                var premakeWorkingDir = Path.GetDirectoryName(script);
 
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(package.DisposalToken);
                 var outputWindow = Package.GetGlobalService(typeof(SVsOutputWindow)) as IVsOutputWindow;
                 if (outputWindow != null)
                 {
@@ -122,15 +135,18 @@ namespace PremakeExtension
                         proc.StartInfo.RedirectStandardError = true;
                         proc.StartInfo.UseShellExecute = false;
                         proc.StartInfo.FileName = premakePath;
+                        proc.StartInfo.WorkingDirectory = premakeWorkingDir;
                         proc.StartInfo.Arguments = premakeArguments;
                         proc.Start();
 
                         proc.OutputDataReceived += (o, args) =>
                         {
+                            ThreadHelper.ThrowIfNotOnUIThread();
                             pane.OutputString(args.Data + "\n");
                         };
                         proc.ErrorDataReceived += (o, args) =>
                         {
+                            ThreadHelper.ThrowIfNotOnUIThread();
                             pane.OutputString(args.Data + "\n");
                         };
 
@@ -141,33 +157,38 @@ namespace PremakeExtension
             }
         }
 
-        private string GetPremakeScript()
+        private async Task<string> GetPremakeScriptAsync()
         {
-            var path = GetSolutionProperty("PremakeScript");
+            var path = await GetSolutionPropertyAsync("PremakeScript");
             if (string.IsNullOrEmpty(path))
                 return null;
 
-            var dte = (DTE2)ServiceProvider.GetService(typeof(DTE));
+            var dte = await ServiceProvider.GetServiceAsync(typeof(DTE)) as DTE2;
+            if (dte == null)
+                return null;
+
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(package.DisposalToken);
             var dir = Path.GetDirectoryName(dte.Solution.FullName);
             return string.IsNullOrEmpty(dir) ? path : Path.GetFullPath(Path.Combine(dir, path));
         }
 
-        private string GetPremakeArguments()
+        private async Task<string> GetPremakeArgumentsAsync()
         {
-            return GetSolutionProperty("PremakeArguments") ?? "vs2015";
+            return await GetSolutionPropertyAsync("PremakeArguments") ?? "vs2017";
         }
 
-        private string GetPremakeBinary()
+        private async Task<string> GetPremakeBinaryAsync()
         {
-            return GetSolutionProperty("PremakeBinary") ?? PremakePath;
+            return await GetSolutionPropertyAsync("PremakeBinary") ?? PremakePath;
         }
 
-        private string GetSolutionProperty(string name)
+        private async Task<string> GetSolutionPropertyAsync(string name)
         {
-            var dte = (DTE2)ServiceProvider.GetService(typeof(DTE));
-            if (dte.Solution == null)
+            var dte = await ServiceProvider.GetServiceAsync(typeof(DTE)) as DTE2;
+            if (dte == null || dte.Solution == null)
                 return null;
 
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(package.DisposalToken);
             var globals = dte.Solution.Globals;
             if (!globals.VariableExists[name])
                 return null;
